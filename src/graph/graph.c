@@ -135,14 +135,6 @@ static inline void _Graph_ApplyPending(GrB_Matrix m) {
 
 /* ========================= Graph utility functions ========================= */
 
-// Get the transposed adjacency matrix.
-static GrB_Matrix _Graph_Get_Transposed_AdjacencyMatrix(const Graph *g) {
-	assert(g);
-	GrB_Matrix m = g->_t_adjacency_matrix;
-	g->SynchronizeMatrix(g, m);
-	return m;
-}
-
 // Return number of nodes graph can contain.
 size_t _Graph_NodeCap(const Graph *g) {
 	return g->nodes->itemCap;
@@ -323,6 +315,11 @@ void Graph_ApplyAllPending(Graph *g) {
 		g->SynchronizeMatrix(g, M);
 	}
 
+	for(int i = 0; i < array_len(g->t_relations); i ++) {
+		M = g->t_relations[i];
+		g->SynchronizeMatrix(g, M);
+	}
+
 	for(int i = 0; i < array_len(g->_relations_map); i ++) {
 		M = g->_relations_map[i];
 		g->SynchronizeMatrix(g, M);
@@ -339,6 +336,7 @@ Graph *Graph_New(size_t node_cap, size_t edge_cap) {
 	g->edges = DataBlock_New(edge_cap, sizeof(Entity), (fpDestructor)FreeEntity);
 	g->labels = array_new(GrB_Matrix, GRAPH_DEFAULT_LABEL_CAP);
 	g->relations = array_new(GrB_Matrix, GRAPH_DEFAULT_RELATION_TYPE_CAP);
+	g->t_relations = array_new(GrB_Matrix, GRAPH_DEFAULT_RELATION_TYPE_CAP);
 	g->_relations_map = array_new(GrB_Matrix, GRAPH_DEFAULT_RELATION_TYPE_CAP);
 	GrB_Matrix_new(&g->adjacency_matrix, GrB_BOOL, node_cap, node_cap);
 	GrB_Matrix_new(&g->_t_adjacency_matrix, GrB_BOOL, node_cap, node_cap);
@@ -543,14 +541,17 @@ int Graph_ConnectNodes(Graph *g, NodeID src, NodeID dest, int r, Edge *e) {
 	e->destNodeID = dest;
 
 	GrB_Matrix adj = Graph_GetAdjacencyMatrix(g);
+	GrB_Matrix tadj = Graph_GetTransposedAdjacencyMatrix(g);
 	GrB_Matrix relationMat = Graph_GetRelationMatrix(g, r);
+	GrB_Matrix tRelationMat = Graph_GetTransposedRelationMatrix(g, r);
 	GrB_Matrix relationMapMat = Graph_GetRelationMap(g, r);
-	GrB_Matrix tadj = _Graph_Get_Transposed_AdjacencyMatrix(g);
 
 	// Rows represent source nodes, columns represent destination nodes.
 	GrB_Matrix_setElement_BOOL(adj, true, src, dest);
 	GrB_Matrix_setElement_BOOL(tadj, true, dest, src);
 	GrB_Matrix_setElement_BOOL(relationMat, true, src, dest);
+	GrB_Matrix_setElement_BOOL(tRelationMat, true, dest, src);
+
 	GrB_Index I = src;
 	GrB_Index J = dest;
 	id = SET_MSB(id);
@@ -609,7 +610,7 @@ void Graph_GetNodeEdges(const Graph *g, const Node *n, GRAPH_EDGE_DIR dir, int e
 	if(dir == GRAPH_EDGE_DIR_INCOMING || dir == GRAPH_EDGE_DIR_BOTH) {
 		/* Retrieve the transposed adjacency matrix, regardless of whether or not
 		 * a relationship type is specified. */
-		M = _Graph_Get_Transposed_AdjacencyMatrix(g);
+		M = Graph_GetTransposedAdjacencyMatrix(g);
 
 		/* Construct an iterator to traverse the node's row, which in the transposed
 		 * adjacency matrix contains all incoming edges. */
@@ -637,6 +638,7 @@ int Graph_DeleteEdge(Graph *g, Edge *e) {
 	bool x;
 	GrB_Matrix R;
 	GrB_Matrix M;
+	GrB_Matrix TM;
 	GrB_Info info;
 	EdgeID edge_id;
 	int r = Edge_GetRelationID(e);
@@ -645,6 +647,7 @@ int Graph_DeleteEdge(Graph *g, Edge *e) {
 
 	R = Graph_GetRelationMap(g, r);
 	M = Graph_GetRelationMatrix(g, r);
+	TM = Graph_GetTransposedRelationMatrix(g, r);
 
 	// Test to see if edge exists.
 	info = GrB_Matrix_extractElement_BOOL(&x, M, src_id, dest_id);
@@ -657,6 +660,7 @@ int Graph_DeleteEdge(Graph *g, Edge *e) {
 		 * delete entry from both M and R. */
 		assert(GxB_Matrix_Delete(M, src_id, dest_id) == GrB_SUCCESS);
 		assert(GxB_Matrix_Delete(R, src_id, dest_id) == GrB_SUCCESS);
+		assert(GxB_Matrix_Delete(TM, dest_id, src_id) == GrB_SUCCESS);
 
 		// See if source is connected to destination with additional edges.
 		bool connected = false;
@@ -674,7 +678,7 @@ int Graph_DeleteEdge(Graph *g, Edge *e) {
 			M = Graph_GetAdjacencyMatrix(g);
 			assert(GxB_Matrix_Delete(M, src_id, dest_id) == GrB_SUCCESS);
 
-			M = _Graph_Get_Transposed_AdjacencyMatrix(g);
+			M = Graph_GetTransposedAdjacencyMatrix(g);
 			assert(GxB_Matrix_Delete(M, dest_id, src_id) == GrB_SUCCESS);
 		}
 	} else {
@@ -750,7 +754,7 @@ void _BulkDeleteNodes(Graph *g, Node *nodes, uint node_count,
 
 	GrB_Descriptor_new(&desc);
 	adj = Graph_GetAdjacencyMatrix(g);
-	tadj = _Graph_Get_Transposed_AdjacencyMatrix(g);
+	tadj = Graph_GetTransposedAdjacencyMatrix(g);
 	GxB_MatrixTupleIter_new(&adj_iter, adj);
 	GxB_MatrixTupleIter_new(&tadj_iter, tadj);
 	GxB_SelectOp_new(&selectop, _select_op_free_edge, GrB_UINT64, GrB_UINT64);
@@ -799,6 +803,7 @@ void _BulkDeleteNodes(Graph *g, Node *nodes, uint node_count,
 	// Free and remove implicit edges from relation matrices.
 	int relation_count = Graph_RelationTypeCount(g);
 	for(int i = 0; i < relation_count; i++) {
+		GrB_Matrix TR;
 		GrB_Matrix R = Graph_GetRelationMap(g, i);
 
 		// Reset mask descriptor.
@@ -845,6 +850,12 @@ void _BulkDeleteNodes(Graph *g, Node *nodes, uint node_count,
 
 	// Update the transposed adjacency matrix.
 	GrB_Matrix_apply(tadj, Mask, GrB_NULL, GrB_IDENTITY_BOOL, tadj, desc);
+
+	for(int i = 0; i < relation_count; i++) {
+		// Remove every entry of TR marked by Mask.
+		GrB_Matrix TR = Graph_GetTransposedRelationMatrix(g, i);
+		GrB_Matrix_apply(TR, Mask, NULL, GrB_IDENTITY_UINT64, TR, desc);
+	}
 
 	/* Delete nodes
 	 * All nodes marked for deleteion are detected, no incoming / outgoing edges. */
@@ -948,21 +959,27 @@ void _BulkDeleteEdges(Graph *g, Edge *edges, size_t edge_count) {
 			GrB_Matrix R = Graph_GetRelationMatrix(g, r); // Relation Matrix.
 			if(mask) {
 				GrB_Matrix M = Graph_GetRelationMap(g, r);  // Relation mapping matrix.
+				GrB_Matrix tM = Graph_GetTransposedRelationMatrix(g, r);  // Transposed relation mapping matrix.
 				// Remove every entry of R and M marked by Mask.
 				// Desc: GrB_MASK = GrB_SCMP,  GrB_OUTP = GrB_REPLACE.
 				// R = R & !mask.
 				GrB_Matrix_apply(R, mask, GrB_NULL, GrB_IDENTITY_BOOL, R, desc);
 				// M = M & !mask.
 				GrB_Matrix_apply(M, mask, GrB_NULL, GrB_IDENTITY_UINT64, M, desc);
+				// Transpose mask.
+				GrB_transpose(mask, GrB_NULL, GrB_NULL, mask, GrB_NULL);
+				// tM = tM & !mask.
+				GrB_Matrix_apply(tM, mask, GrB_NULL, GrB_IDENTITY_UINT64, tM, desc);
 				GrB_free(&mask);
 			}
+
 			// Collect remaining edges. remaining_mask = remaining_mask + R.
 			GrB_eWiseAdd_Matrix_BinaryOp(remaining_mask, GrB_NULL, GrB_NULL, GrB_PLUS_BOOL, remaining_mask, R,
 										 GrB_NULL);
 		}
 
 		GrB_Matrix adj_matrix = Graph_GetAdjacencyMatrix(g);
-		GrB_Matrix t_adj_matrix = _Graph_Get_Transposed_AdjacencyMatrix(g);
+		GrB_Matrix t_adj_matrix = Graph_GetTransposedAdjacencyMatrix(g);
 		// To calculate edges to delete, remove all the remaining edges from "The" adjency matrix.
 		// Set descriptor mask to default.
 		GrB_Descriptor_set(desc, GrB_MASK, GxB_DEFAULT);
@@ -1057,6 +1074,8 @@ int Graph_AddRelationType(Graph *g) {
 	GrB_Matrix m;
 	GrB_Matrix_new(&m, GrB_BOOL, Graph_RequiredMatrixDim(g), Graph_RequiredMatrixDim(g));
 	g->relations = array_append(g->relations, m);
+	GrB_Matrix_new(&m, GrB_BOOL, Graph_RequiredMatrixDim(g), Graph_RequiredMatrixDim(g));
+	g->t_relations = array_append(g->t_relations, m);
 
 	_Graph_AddRelationMap(g);
 
@@ -1069,6 +1088,14 @@ int Graph_AddRelationType(Graph *g) {
 GrB_Matrix Graph_GetAdjacencyMatrix(const Graph *g) {
 	assert(g);
 	GrB_Matrix m = g->adjacency_matrix;
+	g->SynchronizeMatrix(g, m);
+	return m;
+}
+
+// Get the transposed adjacency matrix.
+GrB_Matrix Graph_GetTransposedAdjacencyMatrix(const Graph *g) {
+	assert(g);
+	GrB_Matrix m = g->_t_adjacency_matrix;
 	g->SynchronizeMatrix(g, m);
 	return m;
 }
@@ -1093,6 +1120,19 @@ GrB_Matrix Graph_GetRelationMatrix(const Graph *g, int relation_idx) {
 	return m;
 }
 
+GrB_Matrix Graph_GetTransposedRelationMatrix(const Graph *g, int relation_idx) {
+	assert(g && (relation_idx == GRAPH_NO_RELATION || relation_idx < Graph_RelationTypeCount(g)));
+	GrB_Matrix m;
+
+	if(relation_idx == GRAPH_NO_RELATION) {
+		m = Graph_GetTransposedAdjacencyMatrix(g);
+	} else {
+		m = g->t_relations[relation_idx];
+		g->SynchronizeMatrix(g, m);
+	}
+	return m;
+}
+
 GrB_Matrix Graph_GetZeroMatrix(const Graph *g) {
 	GrB_Index nvals;
 	GrB_Matrix z = g->_zero_matrix;
@@ -1111,7 +1151,7 @@ void Graph_Free(Graph *g) {
 	DataBlockIterator *it;
 	GrB_Matrix z = Graph_GetZeroMatrix(g);
 	GrB_Matrix m = Graph_GetAdjacencyMatrix(g);
-	GrB_Matrix tm = _Graph_Get_Transposed_AdjacencyMatrix(g);
+	GrB_Matrix tm = Graph_GetTransposedAdjacencyMatrix(g);
 	GrB_Matrix_free(&m);
 	GrB_Matrix_free(&z);
 	GrB_Matrix_free(&tm);
@@ -1120,10 +1160,13 @@ void Graph_Free(Graph *g) {
 	for(int i = 0; i < relationCount; i++) {
 		m = g->relations[i];
 		GrB_Matrix_free(&m);
+		m = g->t_relations[i];
+		GrB_Matrix_free(&m);
 		m = g->_relations_map[i];
 		GrB_Matrix_free(&m);
 	}
 	array_free(g->relations);
+	array_free(g->t_relations);
 	array_free(g->_relations_map);
 
 	uint32_t labelCount = array_len(g->labels);

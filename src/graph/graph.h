@@ -64,6 +64,7 @@ struct Graph {
 	GrB_Matrix *labels;                 // Label matrices.
 	GrB_Matrix *relations;              // Relation matrices.
 	GrB_Matrix *_relations_map;         // Maps from (relation, row, col) to edge id.
+    GrB_Matrix *t_relations;            // Transposed relation matrices.
 	GrB_Matrix _zero_matrix;            // Zero matrix.
 	pthread_mutex_t _writers_mutex;     // Mutex restrict single writer.
 	pthread_mutex_t _mutex;             // Mutex for accessing critical sections.
@@ -275,6 +276,12 @@ GrB_Matrix Graph_GetAdjacencyMatrix(
 	const Graph *g
 );
 
+// Retrieves the transposed adjacency matrix.
+// Matrix is resized if its size doesn't match graph's node count.
+GrB_Matrix Graph_GetTransposedAdjacencyMatrix(
+    const Graph *g
+);
+
 // Retrieves a label matrix.
 // Matrix is resized if its size doesn't match graph's node count.
 GrB_Matrix Graph_GetLabelMatrix(
@@ -286,6 +293,13 @@ GrB_Matrix Graph_GetLabelMatrix(
 // Matrix is resized if its size doesn't match graph's node count.
 GrB_Matrix Graph_GetRelationMatrix(
 	const Graph *g,     // Graph from which to get adjacency matrix.
+	int relation        // Relation described by matrix.
+);
+
+// Retrieves a transposed typed adjacency matrix.
+// Matrix is resized if its size doesn't match graph's node count.
+GrB_Matrix Graph_GetTransposedRelationMatrix(
+    const Graph *g,     // Graph from which to get adjacency matrix.
 	int relation        // Relation described by matrix.
 );
 
